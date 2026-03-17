@@ -1374,9 +1374,16 @@ function candLogin() {
   document.getElementById('candLoginError').classList.remove('visible');
   currentCand = cand;
   activeRole = 'candidato';
-  adminAuth = false; // reset admin session
+  adminAuth = false;
   document.getElementById('adminBtn').style.display = 'none';
-  showCandDash();
+  // Sync from sheets to get latest completadas
+  syncFromSheets().then(function() {
+    var updated = getCandidatos().find(function(c) { return c.correo === cand.correo; });
+    if (updated) currentCand = updated;
+    showCandDash();
+  }).catch(function() {
+    showCandDash();
+  });
 }
 
 function showCandDash() {
@@ -1576,6 +1583,7 @@ function submitEval() {
     rec: level.rec
   });
   saveResultados(resultados);
+  pushResultadoToSheets(resultados[resultados.length - 1]);
 
   // Mark prueba as done in candidato
   const candidatos = getCandidatos();
@@ -1647,12 +1655,20 @@ function stopTimer() {
 // ============================================================
 // ADMIN DATA
 // ============================================================
-function getCandidatos() {
+function getCandidatosLocal() {
   return JSON.parse(localStorage.getItem('condux_candidatos') || '[]');
 }
 
-function saveCandidatos(data) {
+function saveCandidatosLocal(data) {
   localStorage.setItem('condux_candidatos', JSON.stringify(data));
+}
+
+function getCandidatos() {
+  return getCandidatosLocal();
+}
+
+function saveCandidatos(data) {
+  saveCandidatosLocal(data);
 }
 
 function getResultados() {
@@ -1661,6 +1677,59 @@ function getResultados() {
 
 function saveResultados(data) {
   localStorage.setItem('condux_resultados', JSON.stringify(data));
+}
+
+async function syncFromSheets() {
+  try {
+    // Sync candidatos
+    var candRes = await fetch(APPS_SCRIPT_URL + '?type=candidatos');
+    var candData = await candRes.json();
+    if (candData && candData.length > 0) {
+      // Merge with local - remote takes priority
+      var local = getCandidatosLocal();
+      var merged = candData.map(function(remote) {
+        var localCand = local.find(function(l) { return l.correo === remote.correo; });
+        if (localCand) {
+          remote.completadas = localCand.completadas || [];
+        }
+        return remote;
+      });
+      // Add any local-only candidatos not in remote
+      local.forEach(function(l) {
+        var exists = merged.find(function(m) { return m.correo === l.correo; });
+        if (!exists) merged.push(l);
+      });
+      saveCandidatosLocal(merged);
+    }
+
+    // Sync resultados
+    var resRes = await fetch(APPS_SCRIPT_URL + '?type=resultados');
+    var resData = await resRes.json();
+    if (resData && resData.length > 0) {
+      var localRes = getResultados();
+      var mergedRes = resData.slice();
+      localRes.forEach(function(l) {
+        var exists = mergedRes.find(function(m) { return m.folio === l.folio; });
+        if (!exists) mergedRes.push(l);
+      });
+      saveResultados(mergedRes);
+
+      // Update completadas based on resultados
+      var cands = getCandidatosLocal();
+      resData.forEach(function(r) {
+        var idx = cands.findIndex(function(c) { return c.correo === r.correo; });
+        if (idx >= 0) {
+          if (!cands[idx].completadas) cands[idx].completadas = [];
+          if (cands[idx].completadas.indexOf(r.prueba) === -1) {
+            cands[idx].completadas.push(r.prueba);
+          }
+        }
+      });
+      saveCandidatosLocal(cands);
+    }
+  } catch(e) {
+    console.log('Sync error:', e);
+  }
 }
 
 function createCandidato() {
@@ -1679,9 +1748,16 @@ function createCandidato() {
 
   document.getElementById('createError').classList.remove('visible');
 
-  const candidatos = getCandidatos();
-  candidatos.push({ nombre, correo, puesto, nivel, pruebas, completadas: [], fechaCreacion: new Date().toLocaleDateString('es-MX') });
+  var candidatos = getCandidatos();
+  var newCand = { nombre: nombre, correo: correo, puesto: puesto, nivel: nivel, pruebas: pruebas, completadas: [], fechaCreacion: new Date().toLocaleDateString('es-MX') };
+  candidatos.push(newCand);
   saveCandidatos(candidatos);
+
+  // Save to Sheets
+  fetch(APPS_SCRIPT_URL, {
+    method: 'POST',
+    body: JSON.stringify({ type: 'candidato', nombre: nombre, correo: correo, puesto: puesto, nivel: nivel, pruebas: pruebas, fechaCreacion: newCand.fechaCreacion })
+  }).catch(function(e) { console.log('Sheets sync error:', e); });
 
   // Reset form
   document.getElementById('newNombre').value = '';
@@ -1693,7 +1769,10 @@ function createCandidato() {
   loadAdminData();
 }
 
-function loadAdminData() {
+async function loadAdminData() {
+  var body = document.getElementById('candidatosTableBody');
+  if (body) body.innerHTML = '<div class="loading-state">Sincronizando datos...</div>';
+  await syncFromSheets();
   loadCandidatosTable();
   loadResultadosTable();
 }
@@ -2262,4 +2341,54 @@ function formatNivel(n) {
 }
 </script>
 </body>
-</html>
+</html>async function saveToSheets(scores, level, fecha, timerData) {
+  var folio = 'CDX-' + Date.now().toString().slice(-6);
+  var payload = {
+    type: 'resultado',
+    folio: folio,
+    correo: currentCand.correo,
+    nombre: currentCand.nombre,
+    puesto: currentCand.puesto,
+    nivel: currentCand.nivel,
+    prueba: currentPrueba,
+    fecha: fecha,
+    total: scores.total,
+    nivel_resultado: level.l,
+    nivel_cls: level.cls,
+    likert: scores.likertScore,
+    situaciones: scores.sitScore,
+    dims: scores.dimScores,
+    tiempo: timerData.formatted,
+    tiempo_extendido: timerData.extended,
+    rec: level.rec
+  };
+
+  // Save to Google Sheets via Apps Script
+  try {
+    await fetch(APPS_SCRIPT_URL, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  } catch(e) {
+    console.log('Sheets error:', e);
+  }
+
+  // Also save to localStorage as backup
+  var existing = JSON.parse(localStorage.getItem('condux_resultados') || '[]');
+  existing.push(payload);
+  localStorage.setItem('condux_resultados', JSON.stringify(existing));
+
+  // Mark prueba as completed
+  var candidatos = getCandidatosLocal();
+  var idx = candidatos.findIndex(function(c) { return c.correo === currentCand.correo; });
+  if (idx >= 0) {
+    if (!candidatos[idx].completadas) candidatos[idx].completadas = [];
+    if (candidatos[idx].completadas.indexOf(currentPrueba) === -1) {
+      candidatos[idx].completadas.push(currentPrueba);
+    }
+    saveCandidatosLocal(candidatos);
+    currentCand = candidatos[idx];
+  }
+}
+
+

@@ -2636,9 +2636,8 @@ function stopCamera() {
 function formatNivel(n) {
   return { operativo: 'Operativo', mando_medio: 'Mando Medio', gerencia: 'Gerencia' }[n] || n;
 }
-</script>
-</body>
-</html>async function saveToSheets(scores, level, fecha, timerData) {
+
+async function saveToSheets(scores, level, fecha, timerData) {
   var folio = 'CDX-' + Date.now().toString().slice(-6);
   var payload = {
     type: 'resultado',
@@ -2693,3 +2692,7 @@ function formatNivel(n) {
 }
 
 
+
+</script>
+</body>
+</html>
